@@ -39,44 +39,49 @@ symbol O_TAIL_DN = b.1
 symbol O_WARN_LAMP = b.3
 
 ; variables
-symbol manualmode = bit0     ; 1 = ignore speed, control manually
-symbol initwarning = bit1    ; 1 = waiting for vss, 0 = vss received
-symbol manual_act = bit2     ; 1 = perform manual action in main loop
-symbol l_state = bit3        ; lamp state
-symbol pulses = b1           ; I_VSS pulse count
-symbol hints_up = b2         ; count of TAIL_UP events > MPH_RAISETAIL
-symbol hints_dn = b3         ; count of TAIL_DN events < MPH_LOWERTAIL
-symbol tailtimer = w3        ; time spent raising/lowering tail
+symbol manual_mode = bit0     ; 1 = ignore speed, control manually
+symbol initial_warning = bit1 ; 1 = waiting for vss, 0 = vss received
+symbol manual_action = bit2   ; 1 = perform manual action in main loop
+symbol lamp_state = bit3      ; lamp state
+symbol pulses = b1            ; I_VSS pulse count
+symbol hints_up = b2          ; count of TAIL_UP events > MPH_RAISETAIL
+symbol hints_dn = b3          ; count of TAIL_DN events < MPH_LOWERTAIL
+symbol lamp_count = b4        ; counter for flash_lamp
+symbol tail_timer = w3        ; time spent raising/lowering tail
+
+#macro flash_lamp(mson, msoff, repeat)
+  let lamp_state = O_WARN_LAMP
+  low O_WARN_LAMP
+  pause 10
+
+  for lamp_count = 1 to repeat
+    high O_WARN_LAMP
+    pause mson
+    low O_WARN_LAMP
+    pause msoff
+    next lamp_count
+
+  if lamp_state = 1 then
+    high O_WARN_LAMP
+  else
+    low O_WARN_LAMP
+  endif
+#endmacro
 
 
 mainloop:
   setint or %00000100, %00000100, C ; interrupt on dash pin high
   if I_IGNITION = 0 then
-    initwarning = 1 ; set initial state
+    initial_warning = 1 ; set initial state
     high O_WARN_LAMP
   endif
-  if I_IGNITION = 0 and I_TAIL_UP = 0 then gosub lower_tail
-  if I_IGNITION = 0 and I_TAIL_DN = 0 then goto power_down
 
-  if manualmode = 1 then
-    if manual_act = 1 then
-      if I_TAIL_UP = 0 then
-	  gosub lower_tail
-	  manual_act = 0
-	elseif I_TAIL_DN = 0 then
-	  gosub raise_tail
-	  manual_act = 0
-      else ; intermediate state, try lowering the tail
-	  gosub flash_lamp
-	  gosub lower_tail
-	  manual_act = 0
-	  if I_TAIL_UP = 1 and I_TAIL_DN = 1 then
-	    high O_WARN_LAMP
-	  endif
-	endif
-    endif
-    goto mainloop
+  if I_IGNITION = 0 then
+    if I_TAIL_UP = 1 and I_TAIL_DN = 1 then gosub reset_tail
+    if I_TAIL_UP = 0 then gosub lower_tail
+    if I_TAIL_DN = 0 then goto power_down
   endif
+
 
   count c.3, COUNTPERIOD, pulses ; sample speed
 
@@ -84,24 +89,61 @@ mainloop:
   let pulses = 85
   #endif
 
-  if initwarning = 1 AND pulses > MPH_LAMPOFF then
-    initwarning = 0
-    low O_WARN_LAMP
-  endif
-
+  ; raise regardless of manual_mode if we exceed MPH_AUTORAISE
   if pulses >= MPH_RAISETAIL and I_TAIL_DN = 0 then
     if pulses >= MPH_AUTORAISE then
       gosub raise_tail
-	goto mainloop
-    else
-      hints_up = hints_up + 1
-      if hints_up > NUM_HINTS_UP then
-	  gosub raise_tail
+	    goto mainloop
+    endif
+  endif
+
+  ; manual_mode=1 is set in the interrupt handler for the dash switch
+  ; we process manual mode here rather than in the interrupt handler
+  ; because reasons
+  if manual_mode = 1 then
+    if manual_action = 1 then ; in a manual raise/lower action
+      if I_TAIL_UP = 0 then
+	      gosub lower_tail
+	      manual_action = 0
+      elseif I_TAIL_DN = 0 then
+	      gosub raise_tail
+	      manual_action = 0
+      else ; intermediate state, try lowering the tail
+	      gosub reset_tail
+	      manual_action = 0
       endif
+    endif
+    goto mainloop
+  endif
+
+
+  ; disable warning lamp if we have an initial speed reading
+  if initial_warning = 1 AND pulses > MPH_LAMPOFF then
+    initial_warning = 0
+    low O_WARN_LAMP
+  endif
+
+  ; raise regardless of manual_mode if we exceed MPH_AUTORAISE
+  if pulses >= MPH_RAISETAIL and I_TAIL_DN = 0 then
+    if pulses >= MPH_AUTORAISE then
+      gosub raise_tail
+	    goto mainloop
+    endif
+  endif
+
+  ; we use 'hints' up and down - we need to hint several times to
+  ; trigger a tail action to avoid thrash
+  ; hints are reset in the subs
+  if pulses >= MPH_RAISETAIL and I_TAIL_DN = 0 then
+    hints_up = hints_up + 1
+    if hints_up > NUM_HINTS_UP then
+      gosub raise_tail
     endif
   elseif pulses <= MPH_LOWERTAIL and I_TAIL_UP = 0 then
     hints_dn = hints_dn + 1
-    if hints_dn > NUM_HINTS_DN then gosub lower_tail
+    if hints_dn > NUM_HINTS_DN then
+      gosub lower_tail
+    endif
   endif
 
   goto mainloop
@@ -110,58 +152,41 @@ raise_tail:
   hints_up = 0
   setint or %00000000, %00000001, C
   high O_TAIL_UP
-  for tailtimer = 1 to TAILLOOP
+  for tail_timer = 1 to TAILLOOP
     if I_TAIL_UP = 0 then
       low O_TAIL_UP
       return
     endif
-    next tailtimer
+    next tail_timer
 
   ; failed to raise the tail
   low O_TAIL_UP
-  gosub flash_lamp
   high O_WARN_LAMP
+  flash_lamp(20, 20, 10)
   return
 
 lower_tail:
   hints_dn = 0
   setint or %00000000, %00000010, C
   high O_TAIL_DN
-  for tailtimer = 1 to TAILLOOP ; 14.1 seconds?
+  for tail_timer = 1 to TAILLOOP ; 14.1 seconds?
     if I_TAIL_DN = 0 then
       low O_TAIL_DN
       return
     endif
-    next tailtimer
+    next tail_timer
 
   ; failed to lower the tail
   low O_TAIL_DN
-  gosub flash_lamp
+  flash_lamp(50, 10, 3)
   high O_WARN_LAMP
   return
 
-flash_lamp:
-  let l_state = O_WARN_LAMP
-  low O_WARN_LAMP
-  sleep 10
-  high O_WARN_LAMP
-  sleep 30
-  low O_WARN_LAMP
-  sleep 20
-  high O_WARN_LAMP
-  sleep 30
-  low O_WARN_LAMP
-  sleep 20
-  if l_state = 1 then
-    high O_WARN_LAMP
-  else
-    low O_WARN_LAMP
-  endif
-  return
+reset_tail:
 
 power_down:
-  manualmode = 0
-  initwarning = 1
+  manual_mode = 0
+  initial_warning = 1
   disablebod
   sleep 2
   enablebod
@@ -171,18 +196,23 @@ interrupt:
   low O_TAIL_UP
   low O_TAIL_DN
   if I_DASH = 1 then
-    high O_WARN_LAMP
-    pause 30
-    low O_WARN_LAMP
+    ; we flash the lamp for ~40ms
+    ; if the dash is still switched we recognize the action
+    flash_lamp(30, 10, 1)
     if I_DASH = 0 then
-      return ; invalid button press
+      return ; didn't hold it long enough, invalid button press
     endif
-    manualmode = 1
-    manual_act = 1
-    pause 100 ; hold dash button to disable manual mode
+
+    ; 40ms has passed - now we're doing manual stuff
+    manual_mode = 1
+    manual_action = 1
+    pause 500
+    flash_lamp(30, 10, 3)
+    ; if we are *still* holding the dash button after this second flash
+    ; we cancel manual mode and return to normal
     if I_DASH = 1 then
-      manualmode = 0
-	manual_act = 0
+      manual_mode = 0
+	    manual_action = 0
     endif
   endif
   setint or %00000100, %00000100, C ; back to watching for dash
