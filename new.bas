@@ -72,22 +72,24 @@ symbol tail_timer = w3        ; time spent raising/lowering tail
 mainloop:
   setint or %00000100, %00000100, C ; interrupt on dash pin high
   if I_IGNITION = 0 then
-    initial_warning = 1 ; set initial state
+    initial_warning = 1
     high O_WARN_LAMP
-  endif
-
-  if I_IGNITION = 0 then
     if I_TAIL_UP = 1 and I_TAIL_DN = 1 then gosub reset_tail
     if I_TAIL_UP = 0 then gosub lower_tail
     if I_TAIL_DN = 0 then goto power_down
   endif
 
-
   count c.3, COUNTPERIOD, pulses ; sample speed
 
   #ifdef simulating
-  let pulses = 85
+  let pulses = 15
   #endif
+
+  ; disable warning lamp if we have an initial speed reading
+  if initial_warning = 1 AND pulses >= MPH_LAMPOFF then
+    initial_warning = 0
+    low O_WARN_LAMP
+  endif
 
   ; raise regardless of manual_mode if we exceed MPH_AUTORAISE
   if pulses >= MPH_RAISETAIL and I_TAIL_DN = 0 then
@@ -114,13 +116,6 @@ mainloop:
       endif
     endif
     goto mainloop
-  endif
-
-
-  ; disable warning lamp if we have an initial speed reading
-  if initial_warning = 1 AND pulses > MPH_LAMPOFF then
-    initial_warning = 0
-    low O_WARN_LAMP
   endif
 
   ; raise regardless of manual_mode if we exceed MPH_AUTORAISE
@@ -183,6 +178,7 @@ lower_tail:
   return
 
 reset_tail:
+  return
 
 power_down:
   manual_mode = 0
@@ -217,5 +213,6 @@ interrupt:
   endif
   setint or %00000100, %00000100, C ; back to watching for dash
   return
+
 
 
